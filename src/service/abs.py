@@ -25,7 +25,8 @@ class Connection(ABC):
     def on_read_event(self, **kwargs) -> None:
         raise NotImplemented()
 
-    def on_write_event(self, key: selectors.SelectorKey) -> None:
+    @staticmethod
+    def on_write_event(key: selectors.SelectorKey) -> None:
         if key.data.outb:
             sent = key.fileobj.send(key.data.outb)  # Should be ready to write
             key.data.outb = key.data.outb[sent:]

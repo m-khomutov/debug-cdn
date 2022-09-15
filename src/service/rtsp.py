@@ -59,10 +59,12 @@ class Source:
         self.pps: bytes = b''
 
     def stream_request(self, address: str, port: int) -> bytes:
-        self.url = ''.join([f'rtsp://{address}:{port}', f'/{self.content}'])
+        if not self.content:
+            self.content = '/'
+        self.url = ''.join([f'rtsp://{address}:{port}', f'{self.content}'])
         self._keepalive = f"OPTIONS {self.url} RTSP/1.0\r\n" \
                           f"CSeq: {self._sequence}\r\n" \
-                          f"User-Agent: debug-rtsp\r\n" \
+                          f"User-Agent: debug-cdn\r\n" \
                           f"{self._get_authorization('OPTIONS')}\r\n"
         logging.debug(self._keepalive)
         return self._keepalive.encode()
@@ -104,7 +106,8 @@ class Source:
             out_bytes: bytes = {
                 'CSeq': self._set_sequence,
                 'Public': self._ask_describe,
-                'Content-Base': self._set_content_base,
+                'Content-Base': self._set_content,
+                'Content-Length': self._set_content,
                 'Session': self._set_session,
                 'Transport': self._set_transport,
                 'WWW-Authenticate': self._set_authentication
@@ -186,11 +189,14 @@ class Source:
     def _set_sequence(self, **kwargs) -> None:
         self._sequence = int(kwargs.get('header').split()[1]) + 1
 
-    def _set_content_base(self, **kwargs) -> bytes:
+    def _set_content(self, **kwargs) -> bytes:
+        if self._state == State.DESCRIBED:
+            return b''
         body: bytes = kwargs.get('body')
         logging.debug(body.decode("utf-8"))
         self._state = State.DESCRIBED
-        self._content_base = kwargs.get('header').split()[1]
+        if kwargs.get('header'):
+            self._content_base = kwargs.get('header').split()[1]
         description = body.decode('utf-8').split('\r\n')
         self._control = [x.split('a=control:')[1] for x in description if 'a=control:' in x and '*' not in x]
         if len(self._control) > 2:
@@ -203,7 +209,7 @@ class Source:
         return f'SETUP {url} RTSP/1.0\r\n'\
                f'Transport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n' \
                f'CSeq: {self._sequence}\r\n' \
-               f'User-Agent: debug-rtsp\r\n' \
+               f'User-Agent: debug-cdn\r\n' \
                f'{self._get_authorization("SETUP")}\r\n'.encode()
 
     def _set_session(self, **kwargs) -> None:
@@ -257,7 +263,7 @@ class Source:
         return f'DESCRIBE {self.url} RTSP/1.0\r\n' \
                f'Accept: application/sdp\r\n' \
                f'CSeq: {self._sequence}\r\n' \
-               f'User-Agent: debug-rtsp\r\n' \
+               f'User-Agent: debug-cdn\r\n' \
                f'{self._get_authorization("DESCRIBE")}\r\n'.encode()
 
     def _ask_play(self) -> bytes:
@@ -269,7 +275,7 @@ class Source:
         return f'PLAY {self._content_base} RTSP/1.0\r\n' \
                f'CSeq: {self._sequence}\r\n' \
                f'Range: {range_hdr}\r\n' \
-               f'User-Agent: debug-rtsp\r\n' \
+               f'User-Agent: debug-cdn\r\n' \
                f'Session: {self._session}\r\n' \
                f'{self._get_authorization("PLAY")}\r\n'.encode()
 
@@ -317,4 +323,4 @@ class Connection(abs.Connection):
         self._proto.sink_table.pop(reg_key, None)
 
     def has_sinks(self) -> bool:
-        return len(self._proto.sink_table)
+        return len(self._proto.sink_table) != 0

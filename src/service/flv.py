@@ -1,10 +1,10 @@
 import logging
-import re
 import selectors
 from enum import IntEnum
 from typing import Dict, List, Set, Tuple, Union
 from . import abs
 from . import rtsp
+from . url import Url
 
 TagType: IntEnum = IntEnum('TagType', ('AUDIO', 'VIDEO'), start=8)
 FrameType: IntEnum = IntEnum('FrameType', ('KEY', 'INTER', 'DISPOSABLE', 'GENERATED', 'INFO'), start=1)
@@ -100,17 +100,17 @@ class Connection(abs.Connection):
     def _set_source(self, headers: List[str], reg_key: Tuple[str, int], **kwargs) -> None:
         connections: Dict[Tuple[str, int], abs.Connection] = kwargs.get('connections')
         if 'GET ' in headers[0]:
-            credentials, address, content = self.__class__._parse_url(headers[0].split(' ')[1].lstrip('/'))
-            logging.info(f'credentials: {credentials} address: {address} content: {content}')
-            if connections.get(address) is None:
-                self._rtsp_source = rtsp.Connection(address, rtsp.Source(credentials, content))
-                connections[address] = self._rtsp_source
+            url: Url = Url(headers[0].split(' ')[1].lstrip('/'))
+            if connections.get(url.address) is None:
+                self._rtsp_source = rtsp.Connection(url.address, rtsp.Source(url.credentials, url.content))
+                connections[url.address] = self._rtsp_source
                 self._rtsp_source.connect(kwargs.get('selector'))
             else:
-                self._rtsp_source = connections.get(address)
+                self._rtsp_source = connections.get(url.address)
             self._rtsp_source.add_sink(self, reg_key)
 
-    def _compile_header(self, sps: bytes, pps: bytes) -> bytes:
+    @staticmethod
+    def _compile_header(sps: bytes, pps: bytes) -> bytes:
         avc_header: AvcSequenceHeader = AvcSequenceHeader(b''.join([b'\x01', sps[1:4],
                                                                     b'\xff\xe1', len(sps).to_bytes(2, 'big'), sps,
                                                                     b'\x01', len(pps).to_bytes(2, 'big'), pps]))
@@ -118,22 +118,6 @@ class Connection(abs.Connection):
                          bytes(FlvHeader()),
                          b'\x00\x00\x00\x00',
                          bytes(FlvBody(avc_header))])
-
-    @staticmethod
-    def _parse_url(url):
-        pattern: str = r'(?P<proto>\w{4})://' \
-                       r'(?P<auth>[\w]+:[\w%<]+@)?' \
-                       r'(?P<ip>[\d]{1,3}\.[\d]{1,3}\.[\d]{1,3}\.[\d]{1,3})' \
-                       r'(?P<port>:[\d]{3,6})?' \
-                       r'(?P<content>.*)'
-        m = re.search(pattern, url)
-        if not m or m['proto'] != 'rtsp':
-            raise abs.ConnectionException(f'invalid url {url}')
-        port: int = int(m['port'][1:]) if m['port'] else 554
-        credentials: Tuple[str, ...] = tuple()
-        if m['auth']:
-            credentials = tuple(m['auth'][:-1].split(':'))
-        return credentials, (m['ip'], port), m['content']
 
     def on_frame(self, frame: bytes, timestamp: int, sps: bytes, pps: bytes) -> None:
         if frame[0] & 0x1F == abs.UnitType.IDR:
@@ -144,14 +128,14 @@ class Connection(abs.Connection):
     def _on_idr_frame(self, frame: bytes, timestamp: int, sps: bytes, pps: bytes) -> None:
         rc = b''
         if not self._sent_key:
-            rc = self._compile_header(sps, pps)
+            rc = self.__class__._compile_header(sps, pps)
         if self._timestamp is None:
             self._timestamp = timestamp
         self._key.data.outb = b''.join([rc, bytes(FlvBody(AvcNalUnit(FrameType.KEY,
-                                                                    b''.join([len(sps).to_bytes(4, 'big'), sps,
-                                                                              len(pps).to_bytes(4, 'big'), pps,
-                                                                              len(frame).to_bytes(4, 'big'), frame]),
-                                                                    (timestamp - self._timestamp) // 90)))])
+                                                                     b''.join([len(sps).to_bytes(4, 'big'), sps,
+                                                                               len(pps).to_bytes(4, 'big'), pps,
+                                                                               len(frame).to_bytes(4, 'big'), frame]),
+                                                                     (timestamp - self._timestamp) // 90)))])
         self._sent_key = True
 
     def _on_nonidr_frame(self, frame: bytes, timestamp: int) -> None:
