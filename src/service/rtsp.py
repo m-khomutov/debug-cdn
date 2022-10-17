@@ -8,7 +8,7 @@ from base64 import b64encode
 from collections import namedtuple
 from enum import IntEnum
 from hashlib import md5
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Union
 from . import abs
 
 
@@ -32,9 +32,13 @@ class RtspException(BaseException):
 
 
 class Source:
-    def __init__(self, credentials: tuple, content: str) -> None:
+    def __init__(self, credentials: tuple, content: str, fps: Union[int, None]) -> None:
         self.credentials = credentials
         self.content: str = content
+        self._fps: Union[int, None] = fps
+        self._start_fps: int = time.time()
+        self._frames_per_period: int = 0
+        self._keyframes_per_period: int = 0
         self.sink_table: Dict[Tuple[str, int], Connection] = {}
         self._sequence: int = 1
         self._buffer: bytearray = bytearray()
@@ -178,6 +182,18 @@ class Source:
                      f'{int((time.time() - self._timing) * 1000)}')
         self.timestamp_delta[1] = header.timestamp
         self._timing = time.time()
+        if self._fps:
+            self._frames_per_period += 1
+            if self._frame[0] & 0x1f == abs.UnitType.IDR:
+                self._keyframes_per_period += 1
+            if self._timing - self._start_fps > self._fps:
+                logging.info(f'FPS={self._frames_per_period / (self._timing - self._start_fps):.06}'
+                             f' frames={self._frames_per_period}'
+                             f' period={self._timing - self._start_fps:.04}s.'
+                             f' keys={self._keyframes_per_period}')
+                self._start_fps = self._timing
+                self._frames_per_period = 0
+                self._keyframes_per_period = 0
 
     def _initialize_timestamp_set(self, header: RtpHeader):
         if not self.timestamp_delta[0]:

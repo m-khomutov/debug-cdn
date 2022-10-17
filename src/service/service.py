@@ -26,7 +26,10 @@ class Service:
             self._rtsp_url = Url(kwargs.get('rtsp_url'))
             self._connections[self._rtsp_url.address] = RtspConnection(self._rtsp_url.address,
                                                                        RtspSource(self._rtsp_url.credentials,
-                                                                                  self._rtsp_url.content))
+                                                                                  self._rtsp_url.content,
+                                                                                  kwargs.get('fps')
+                                                                                  )
+                                                                       )
 
     def __del__(self):
         self._accept_sock.close()
@@ -96,6 +99,7 @@ def run():
     parser: argparse.ArgumentParser = argparse.ArgumentParser(description='rtsp->flv timestamping test service')
     parser.add_argument('-url', type=str, help='rtsp url to watch timeline (streaming is disabled)')
     parser.add_argument('-port', type=int, default=5566, help='http binding port to stream flv(def. 5566)')
+    parser.add_argument('-fps', type=int, default=10, help='fps calculation period (sec.) (def. 10)')
     parser.add_argument('-loglevel',
                         type=str,
                         default='info',
@@ -109,4 +113,4 @@ def run():
         'debug': lambda: logging.DEBUG,
     }.get(args.loglevel, logging.NOTSET)()
     logging.getLogger().setLevel(level)
-    Service(rtsp_url=args.url).run(args.port)
+    Service(rtsp_url=args.url, fps=args.fps).run(args.port)

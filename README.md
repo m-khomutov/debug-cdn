@@ -17,6 +17,7 @@ Receives RTSP/RTP stream. Logs RTSP protocol, RTP timing. Streams received video
 * -h, --help          show this help message and exit
 * -url URL            rtsp url to watch timeline (streaming is disabled)
 * -port PORT          http binding port to stream flv(def. 5566)
+* -fps FPS            fps calculation period (sec.) (def. 10)
 * -loglevel LOGLEVEL  logging level (critical|error|warning|info|debug def. info)
 
 **restrictions**
