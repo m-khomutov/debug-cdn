@@ -102,7 +102,7 @@ class Connection(abs.Connection):
         if 'GET ' in headers[0]:
             url: Url = Url(headers[0].split(' ')[1].lstrip('/'))
             if connections.get(url.address) is None:
-                self._rtsp_source = rtsp.Connection(url.address, rtsp.Source(url.credentials, url.content))
+                self._rtsp_source = rtsp.Connection(url.address, rtsp.Source(url.credentials, url.content, None))
                 connections[url.address] = self._rtsp_source
                 self._rtsp_source.connect(kwargs.get('selector'))
             else:

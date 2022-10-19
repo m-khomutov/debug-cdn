@@ -113,4 +113,7 @@ def run():
         'debug': lambda: logging.DEBUG,
     }.get(args.loglevel, logging.NOTSET)()
     logging.getLogger().setLevel(level)
-    Service(rtsp_url=args.url, fps=args.fps).run(args.port)
+    try:
+        Service(rtsp_url=args.url, fps=args.fps).run(args.port)
+    except BaseException as e:
+        logging.critical(e)

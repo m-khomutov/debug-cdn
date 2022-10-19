@@ -4,12 +4,13 @@ import selectors
 import socket
 import time
 import types
-from base64 import b64encode
+from base64 import b64encode, b64decode
 from collections import namedtuple
 from enum import IntEnum
 from hashlib import md5
 from typing import Dict, Tuple, Union
 from . import abs
+from . import sdp
 
 
 State: IntEnum = IntEnum('State', ('INITIAL',
@@ -19,6 +20,12 @@ State: IntEnum = IntEnum('State', ('INITIAL',
                                    'PLAYING')
                          )
 SequenceSetType: IntEnum = IntEnum('SequenceSetType', ('SPS', 'PPS'), start=7)
+InterleavedChannel: IntEnum = IntEnum('InterleavedChannel', ('VIDEO',
+                                                             'RTCP_VIDEO',
+                                                             'AUDIO',
+                                                             'RTCP_AUDIO'
+                                                             ), start=0
+                                      )
 
 
 RtpInterleaved: namedtuple = namedtuple('RtpInterleaved', 'preamble channel size')
@@ -35,6 +42,7 @@ class Source:
     def __init__(self, credentials: tuple, content: str, fps: Union[int, None]) -> None:
         self.credentials = credentials
         self.content: str = content
+        self._content_base: str = ''
         self._fps: Union[int, None] = fps
         self._start_fps: int = time.time()
         self._frames_per_period: int = 0
@@ -45,8 +53,8 @@ class Source:
         self._interleaved: RtpInterleaved = RtpInterleaved('$', 0, 0)
         self._state: State = State.INITIAL
         self.url: str = ''
-        self._control: list = []
         self._session: str = ''
+        self._sdp: sdp.Sdp = sdp.Sdp()
         self._transport: str = ''
         self.range = []
         self._authorization: list = ['', '']
@@ -70,7 +78,7 @@ class Source:
                           f"CSeq: {self._sequence}\r\n" \
                           f"User-Agent: debug-cdn\r\n" \
                           f"{self._get_authorization('OPTIONS')}\r\n"
-        logging.debug(self._keepalive)
+        logging.info(self._keepalive)
         return self._keepalive.encode()
 
     def on_stream(self, key: selectors.SelectorKey, data: bytes) -> None:
@@ -101,7 +109,7 @@ class Source:
         self._buffer.clear()
 
     def _on_rtsp_dialog(self, headers: list, remains: bytes) -> bytes:
-        logging.debug('\n'.join(headers)+'\n')
+        logging.info('\n'.join(headers)+'\n')
         self._set_status(headers[0])
         rc = b''
         if not (self._status == 200 or self._status == 401):
@@ -121,7 +129,7 @@ class Source:
         if self._state == State.SETUP:
             rc = self._ask_play()
         if rc:
-            logging.debug(rc.decode('utf-8'))
+            logging.info(rc.decode('utf-8'))
         return rc
 
     def _on_rtp_data(self, data: bytes):
@@ -134,9 +142,10 @@ class Source:
             else:
                 return
         while True:
-            interleaved: RtpInterleaved = RtpInterleaved(str(self._buffer[0]),
+            interleaved: RtpInterleaved = RtpInterleaved(chr(self._buffer[0]),
                                                          self._buffer[1],
                                                          int.from_bytes(self._buffer[2:4], byteorder='big'))
+            logging.debug(interleaved)
             if len(self._buffer) > interleaved.size + 8:
                 header: RtpHeader = RtpHeader((self._buffer[4] >> 6) & 3,
                                               (self._buffer[4] >> 5) & 1,
@@ -147,22 +156,23 @@ class Source:
                                               int.from_bytes(self._buffer[6:8], byteorder='big'),
                                               int.from_bytes(self._buffer[8:12], byteorder='big'),
                                               int.from_bytes(self._buffer[12:16], byteorder='big'))
-                unit: UnitHeader = UnitHeader(self._buffer[16] >> 7,
-                                              (self._buffer[16] >> 5) & 3,
-                                              (self._buffer[16]) & 0x1f)
-                if unit.type == abs.UnitType.FU_A:
-                    fu_header: FUHeader = FUHeader(self._buffer[17] >> 7,
-                                                   (self._buffer[17] >> 6) & 1,
-                                                   (self._buffer[17] >> 5) & 1,
-                                                   (self._buffer[17]) & 0x1f)
-                    if fu_header.s:
-                        self._frame = ((unit.f << 7) | (unit.nri << 5) | fu_header.type).to_bytes(1, 'big')
-                    self._frame += self._buffer[18:interleaved.size + 4]
-                    if fu_header.e:
+                if interleaved.channel == InterleavedChannel.VIDEO:
+                    unit: UnitHeader = UnitHeader(self._buffer[16] >> 7,
+                                                  (self._buffer[16] >> 5) & 3,
+                                                  (self._buffer[16]) & 0x1f)
+                    if unit.type == abs.UnitType.FU_A:
+                        fu_header: FUHeader = FUHeader(self._buffer[17] >> 7,
+                                                       (self._buffer[17] >> 6) & 1,
+                                                       (self._buffer[17] >> 5) & 1,
+                                                       (self._buffer[17]) & 0x1f)
+                        if fu_header.s:
+                            self._frame = ((unit.f << 7) | (unit.nri << 5) | fu_header.type).to_bytes(1, 'big')
+                        self._frame += self._buffer[18:interleaved.size + 4]
+                        if fu_header.e:
+                            self._on_frame_ready(header)
+                    else:
+                        self._frame = self._buffer[16:interleaved.size + 4]
                         self._on_frame_ready(header)
-                else:
-                    self._frame = self._buffer[16:interleaved.size + 4]
-                    self._on_frame_ready(header)
                 self._buffer = self._buffer[interleaved.size + 4:]
             else:
                 break
@@ -209,21 +219,29 @@ class Source:
         if self._state == State.DESCRIBED:
             return b''
         body: bytes = kwargs.get('body')
-        logging.debug(body.decode("utf-8"))
-        self._state = State.DESCRIBED
-        if kwargs.get('header'):
+        if kwargs.get('header') and 'Content-Base' in kwargs.get('header'):
+            logging.info(body.decode("utf-8"))
             self._content_base = kwargs.get('header').split()[1]
-        description = body.decode('utf-8').split('\r\n')
-        self._control = [x.split('a=control:')[1] for x in description if 'a=control:' in x and '*' not in x]
-        if len(self._control) > 2:
-            self._control = self._control[1:3]
+        self._sdp.parse(body.decode('utf-8'))
+        if not self._sdp.media('video') or not self._sdp.media('video').attribute('control'):
+            raise RtspException(f'invalid SDP: \n{self._sdp}')
+        control: str = self._sdp.media('video').attribute('control')
+        if self._sdp.media('video').attribute('fmtp'):
+            sprop = self._sdp.media('video').attribute('fmtp').split('sprop-parameter-sets=')[1].split(';')[0]
+            sprop = sprop.split(',')
+            self.sps = b64decode(sprop[0])
+            self.pps = b64decode(sprop[1])
         if not self.range:
-            range_hdr = [x.split(':')[1].split('=')[1] for x in description if 'a=range:' in x]
+            range_hdr = self._sdp.media('video').attribute('range')
             if range_hdr:
-                self.range = range_hdr[0].split('-')
-        url: str = self._control[0] if 'rtsp://' in self._control[0] else self._content_base + self._control[0]
+                self.range = range_hdr.split('=')[1].split('-')
+        if not self._content_base:
+            return b''
+        self._state = State.DESCRIBED
+        url: str = control if 'rtsp://' in control else self._content_base + control
         return f'SETUP {url} RTSP/1.0\r\n'\
-               f'Transport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n' \
+               f'Transport: RTP/AVP/TCP;unicast;' \
+               f'interleaved={InterleavedChannel.VIDEO}-{InterleavedChannel.RTCP_VIDEO}\r\n' \
                f'CSeq: {self._sequence}\r\n' \
                f'User-Agent: debug-cdn\r\n' \
                f'{self._get_authorization("SETUP")}\r\n'.encode()
@@ -240,8 +258,22 @@ class Source:
         else:
             self._state = State.PLAYING
 
-    def _set_transport(self, **kwargs) -> None:
+    def _set_transport(self, **kwargs) -> str:
         self._transport = kwargs.get('header').split()[1]
+        channel: int = int(self._transport.split('interleaved=')[1].split('-')[0])
+        if channel == InterleavedChannel.VIDEO:
+            if self._sdp.media('audio') and self._sdp.media('audio').attribute('control'):
+                control: str = self._sdp.media('audio').attribute('control')
+                url: str = control if 'rtsp://' in control else self._content_base + control
+                self._state = State.DESCRIBED
+                return f'SETUP {url} RTSP/1.0\r\n' \
+                       f'Transport: RTP/AVP/TCP;unicast;' \
+                       f'interleaved={InterleavedChannel.AUDIO}-{InterleavedChannel.RTCP_AUDIO}\r\n' \
+                       f'CSeq: {self._sequence}\r\n' \
+                       f'Session: {self._session}\r\n' \
+                       f'User-Agent: debug-cdn\r\n' \
+                       f'{self._get_authorization("SETUP")}\r\n'.encode()
+        self._state = State.SETUP
 
     def _set_authentication(self, **kwargs) -> bytes:
         if self._credentials_not_accepted > 4:
