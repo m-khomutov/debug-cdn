@@ -209,11 +209,11 @@ class MediaDescription:
 
 
 class Sdp:
-    def __init__(self):
+    def __init__(self) -> None:
         self._session_description: SessionDescription = SessionDescription()
         self._media_descriptions: Dict[str, MediaDescription] = {}
 
-    def parse(self, description: str):
+    def parse(self, description: str) -> None:
         d: List[str] = description.splitlines()
         parsed: int = self._session_description.parse(d)
         while parsed < len(d):
@@ -221,10 +221,13 @@ class Sdp:
             parsed += m.parse(d[parsed:])
             self._media_descriptions[m.media()] = m
 
-    def media(self, key: str):
+    def media(self, key: str) -> MediaDescription:
         return self._media_descriptions.get(key, None)
 
-    def __repr__(self):
+    def empty(self) -> bool:
+        return not len(self._media_descriptions)
+
+    def __repr__(self) -> str:
         rc: List[str] = [str(self._session_description)]
         rc.extend([str(x) for x in self._media_descriptions.values()])
         return ''.join(rc)

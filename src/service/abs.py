@@ -31,7 +31,13 @@ class Connection(ABC):
             sent = key.fileobj.send(key.data.outb)  # Should be ready to write
             key.data.outb = key.data.outb[sent:]
 
-    def on_frame(self, frame: bytes, timestamp: int, sps: bytes, pps: bytes) -> None:
+    def on_sdp(self, sdp):
+        raise NotImplemented()
+
+    def on_video(self, frame: bytes, timestamp: int, sps: bytes, pps: bytes) -> None:
+        raise NotImplemented()
+
+    def on_audio(self, frame: bytes, timestamp: int) -> None:
         raise NotImplemented()
 
     def add_sink(self, connection: Connection, reg_key: Tuple[str, int]) -> None:

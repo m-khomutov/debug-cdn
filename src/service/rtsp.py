@@ -44,7 +44,7 @@ class Source:
         self.content: str = content
         self._content_base: str = ''
         self._fps: Union[int, None] = fps
-        self._start_fps: int = time.time()
+        self._start_fps: float = time.time()
         self._frames_per_period: int = 0
         self._keyframes_per_period: int = 0
         self.sink_table: Dict[Tuple[str, int], Connection] = {}
@@ -54,7 +54,7 @@ class Source:
         self._state: State = State.INITIAL
         self.url: str = ''
         self._session: str = ''
-        self._sdp: sdp.Sdp = sdp.Sdp()
+        self.sdp: sdp.Sdp = sdp.Sdp()
         self._transport: str = ''
         self.range = []
         self._authorization: list = ['', '']
@@ -169,22 +169,25 @@ class Source:
                             self._frame = ((unit.f << 7) | (unit.nri << 5) | fu_header.type).to_bytes(1, 'big')
                         self._frame += self._buffer[18:interleaved.size + 4]
                         if fu_header.e:
-                            self._on_frame_ready(header)
+                            self._on_video_frame_ready(header)
                     else:
                         self._frame = self._buffer[16:interleaved.size + 4]
-                        self._on_frame_ready(header)
+                        self._on_video_frame_ready(header)
+                elif interleaved.channel == InterleavedChannel.AUDIO:
+                    self._frame = self._buffer[16:interleaved.size + 4]
+                    self._on_audio_frame_ready(header)
                 self._buffer = self._buffer[interleaved.size + 4:]
             else:
                 break
 
-    def _on_frame_ready(self, header: RtpHeader):
+    def _on_video_frame_ready(self, header: RtpHeader):
         if self._frame[0] & 0x1f == SequenceSetType.SPS:
             self.sps = self._frame
         elif self._frame[0] & 0x1f == SequenceSetType.PPS:
             self.pps = self._frame
         if self.sps and self.pps:
             for sink in self.sink_table.values():
-                sink.on_frame(self._frame, header.timestamp, self.sps, self.pps)
+                sink.on_video(self._frame, header.timestamp, self.sps, self.pps)
         self._initialize_timestamp_set(header)
         logging.info(f'{hex(self._frame[0])} '
                      f'{header.timestamp} '
@@ -205,6 +208,11 @@ class Source:
                 self._frames_per_period = 0
                 self._keyframes_per_period = 0
 
+    def _on_audio_frame_ready(self, header: RtpHeader):
+        # TODO parse AU headers in 4 bytes
+        for sink in self.sink_table.values():
+            sink.on_audio(self._frame[4:], header.timestamp)
+
     def _initialize_timestamp_set(self, header: RtpHeader):
         if not self.timestamp_delta[0]:
             self.timestamp_delta = [header.timestamp, header.timestamp]
@@ -222,17 +230,19 @@ class Source:
         if kwargs.get('header') and 'Content-Base' in kwargs.get('header'):
             logging.info(body.decode("utf-8"))
             self._content_base = kwargs.get('header').split()[1]
-        self._sdp.parse(body.decode('utf-8'))
-        if not self._sdp.media('video') or not self._sdp.media('video').attribute('control'):
-            raise RtspException(f'invalid SDP: \n{self._sdp}')
-        control: str = self._sdp.media('video').attribute('control')
-        if self._sdp.media('video').attribute('fmtp'):
-            sprop = self._sdp.media('video').attribute('fmtp').split('sprop-parameter-sets=')[1].split(';')[0]
+        self.sdp.parse(body.decode('utf-8'))
+        if not self.sdp.media('video') or not self.sdp.media('video').attribute('control'):
+            raise RtspException(f'invalid SDP: \n{self.sdp}')
+        for sink in self.sink_table.values():
+            sink.on_sdp(self.sdp)
+        control: str = self.sdp.media('video').attribute('control')
+        if self.sdp.media('video').attribute('fmtp'):
+            sprop = self.sdp.media('video').attribute('fmtp').split('sprop-parameter-sets=')[1].split(';')[0]
             sprop = sprop.split(',')
             self.sps = b64decode(sprop[0])
             self.pps = b64decode(sprop[1])
         if not self.range:
-            range_hdr = self._sdp.media('video').attribute('range')
+            range_hdr = self.sdp.media('video').attribute('range')
             if range_hdr:
                 self.range = range_hdr.split('=')[1].split('-')
         if not self._content_base:
@@ -258,12 +268,12 @@ class Source:
         else:
             self._state = State.PLAYING
 
-    def _set_transport(self, **kwargs) -> str:
+    def _set_transport(self, **kwargs) -> bytes:
         self._transport = kwargs.get('header').split()[1]
         channel: int = int(self._transport.split('interleaved=')[1].split('-')[0])
         if channel == InterleavedChannel.VIDEO:
-            if self._sdp.media('audio') and self._sdp.media('audio').attribute('control'):
-                control: str = self._sdp.media('audio').attribute('control')
+            if self.sdp.media('audio') and self.sdp.media('audio').attribute('control'):
+                control: str = self.sdp.media('audio').attribute('control')
                 url: str = control if 'rtsp://' in control else self._content_base + control
                 self._state = State.DESCRIBED
                 return f'SETUP {url} RTSP/1.0\r\n' \
@@ -365,6 +375,8 @@ class Connection(abs.Connection):
         raise EOFError()
 
     def add_sink(self, connection: abs.Connection, reg_key: Tuple[str, int]) -> None:
+        if not self._proto.sdp.empty():
+            connection.on_sdp(self._proto.sdp)
         self._proto.sink_table[reg_key] = connection
 
     def remove_sink(self, reg_key: Tuple[str, int]) -> None:
