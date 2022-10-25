@@ -248,7 +248,7 @@ class Source:
         if not self._content_base:
             return b''
         self._state = State.DESCRIBED
-        url: str = control if 'rtsp://' in control else self._content_base + control
+        url: str = self._set_url(control)
         return f'SETUP {url} RTSP/1.0\r\n'\
                f'Transport: RTP/AVP/TCP;unicast;' \
                f'interleaved={InterleavedChannel.VIDEO}-{InterleavedChannel.RTCP_VIDEO}\r\n' \
@@ -273,8 +273,7 @@ class Source:
         channel: int = int(self._transport.split('interleaved=')[1].split('-')[0])
         if channel == InterleavedChannel.VIDEO:
             if self.sdp.media('audio') and self.sdp.media('audio').attribute('control'):
-                control: str = self.sdp.media('audio').attribute('control')
-                url: str = control if 'rtsp://' in control else self._content_base + control
+                url: str = self._set_url(self.sdp.media('audio').attribute('control'))
                 self._state = State.DESCRIBED
                 return f'SETUP {url} RTSP/1.0\r\n' \
                        f'Transport: RTP/AVP/TCP;unicast;' \
@@ -316,6 +315,11 @@ class Source:
                                  f' uri="{self.url}",' \
                                  f' algorithm="MD5",' \
                                  f' response="'
+
+    def _set_url(self, control: str) -> str:
+        if control.startswith('rtsp://'):
+            return control
+        return self._content_base + control if self._content_base[-1] == '/' else self._content_base + '/' + control
 
     def _ask_describe(self, **kwargs) -> bytes:
         return f'DESCRIBE {self.url} RTSP/1.0\r\n' \
