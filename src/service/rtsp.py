@@ -10,6 +10,7 @@ from enum import IntEnum
 from hashlib import md5
 from typing import Dict, Tuple, Union
 from . import abs
+from . import calculator
 from . import sdp
 
 
@@ -43,10 +44,7 @@ class Source:
         self.credentials = credentials
         self.content: str = content
         self._content_base: str = ''
-        self._fps: Union[int, None] = fps
-        self._start_fps: float = time.time()
-        self._frames_per_period: int = 0
-        self._keyframes_per_period: int = 0
+        self._fps_calculator: Union[calculator.FpsCalculator, None] = calculator.FpsCalculator(fps) if fps else None
         self.sink_table: Dict[Tuple[str, int], Connection] = {}
         self._sequence: int = 1
         self._buffer: bytearray = bytearray()
@@ -195,18 +193,8 @@ class Source:
                      f'{int((time.time() - self._timing) * 1000)}')
         self.timestamp_delta[1] = header.timestamp
         self._timing = time.time()
-        if self._fps:
-            self._frames_per_period += 1
-            if self._frame[0] & 0x1f == abs.UnitType.IDR:
-                self._keyframes_per_period += 1
-            if self._timing - self._start_fps > self._fps:
-                logging.info(f'FPS={self._frames_per_period / (self._timing - self._start_fps):.06}'
-                             f' frames={self._frames_per_period}'
-                             f' period={self._timing - self._start_fps:.04}s.'
-                             f' keys={self._keyframes_per_period}')
-                self._start_fps = self._timing
-                self._frames_per_period = 0
-                self._keyframes_per_period = 0
+        if self._fps_calculator:
+            self._fps_calculator.on_data(self._frame)
 
     def _on_audio_frame_ready(self, header: RtpHeader):
         # TODO parse AU headers in 4 bytes
@@ -351,9 +339,11 @@ class Source:
 
 class Connection(abs.Connection):
     """Class to connect to stream source"""
-    def __init__(self, address, proto) -> None:
+    def __init__(self, address, proto, br: Union[int, None]) -> None:
         self._address: Tuple[str, int] = address
         self._proto = proto
+        self._br_calculator: Union[calculator.BitrateCalculator, None] = \
+            calculator.BitrateCalculator(br) if br else None
         self._stream_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
     def __repr__(self):
@@ -374,6 +364,8 @@ class Connection(abs.Connection):
     def on_read_event(self, **kwargs):
         key: selectors.SelectorKey = kwargs.get('key')
         data: bytes = key.fileobj.recv(1024)
+        if self._br_calculator:
+            self._br_calculator.on_data(data)
         if data:
             return self._proto.on_stream(key, data)
         raise EOFError()

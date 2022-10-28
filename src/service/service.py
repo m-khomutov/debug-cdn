@@ -27,8 +27,9 @@ class Service:
             self._connections[self._rtsp_url.address] = RtspConnection(self._rtsp_url.address,
                                                                        RtspSource(self._rtsp_url.credentials,
                                                                                   self._rtsp_url.content,
-                                                                                  kwargs.get('fps')
-                                                                                  )
+                                                                                  kwargs.get('fps'),
+                                                                                  ),
+                                                                       kwargs.get('br')
                                                                        )
 
     def __del__(self):
@@ -43,7 +44,7 @@ class Service:
                 self._accept_sock.bind(('0.0.0.0', bind_port))
                 break
             except OSError as e:
-                logging.error(e)
+                logging.exception(e)
                 time.sleep(2)
         self._accept_sock.listen()
         self._accept_sock.setblocking(False)
@@ -100,6 +101,7 @@ def run():
     parser.add_argument('-url', type=str, help='rtsp url to watch timeline (streaming is disabled)')
     parser.add_argument('-port', type=int, default=5566, help='http binding port to stream flv(def. 5566)')
     parser.add_argument('-fps', type=int, default=10, help='fps calculation period (sec.) (def. 10)')
+    parser.add_argument('-br', type=int, default=10, help='bitrate calculation period (sec.) (def. 10)')
     parser.add_argument('-loglevel',
                         type=str,
                         default='info',
@@ -114,6 +116,6 @@ def run():
     }.get(args.loglevel, logging.NOTSET)()
     logging.getLogger().setLevel(level)
     try:
-        Service(rtsp_url=args.url, fps=args.fps).run(args.port)
+        Service(rtsp_url=args.url, fps=args.fps, br=args.br).run(args.port)
     except BaseException as e:
         logging.critical(e)
