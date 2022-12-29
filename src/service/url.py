@@ -24,6 +24,7 @@ class Url:
         self.address: Tuple[str, int] = (m['ip'], port)
         self.content: str = m['content']
         self.credentials: Tuple[str, ...] = tuple()
+        self.dump: str = f'rtsp_{self.address[0]}_{self.address[1]}_{self.content}.dump'.replace('/', '_')
         if m['auth']:
             self.credentials = tuple(m['auth'][:-1].split(':'))
         logging.info(f'credentials: {self.credentials} address: {self.address} content: {self.content}')

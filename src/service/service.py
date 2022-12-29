@@ -17,24 +17,32 @@ class ServiceException(BaseException):
 
 
 class Service:
-    def __init__(self, **kwargs):
+    def __init__(self, args: argparse.Namespace):
+        print(args)
         self._connections: Dict[Tuple[str, int], Connection] = {}
         self._selector = selectors.DefaultSelector()
         self._accept_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._rtsp_url: Union[Url, None] = None
-        if kwargs.get('rtsp_url'):
-            self._rtsp_url = Url(kwargs.get('rtsp_url'))
+        if args.url:
+            self._rtsp_url = Url(args.url)
             self._connections[self._rtsp_url.address] = RtspConnection(self._rtsp_url.address,
-                                                                       RtspSource(self._rtsp_url.credentials,
-                                                                                  self._rtsp_url.content,
-                                                                                  kwargs.get('fps'),
+                                                                       RtspSource(credentials=self._rtsp_url.credentials,
+                                                                                  content=self._rtsp_url.content,
+                                                                                  fps=args.fps,
+                                                                                  dump=self._rtsp_url.dump if args.dump
+                                                                                  else '',
+                                                                                  pos_period=
+                                                                                  args.position if args.position else 0
                                                                                   ),
-                                                                       kwargs.get('br')
+                                                                       args.br
                                                                        )
 
     def __del__(self):
-        self._accept_sock.close()
-        self._selector.close()
+        try:
+            self._accept_sock.close()
+            self._selector.close()
+        except AttributeError as e:
+            logging.exception(e)
         logging.info(f'stop listening Ok')
 
     def run(self, bind_port: int):
@@ -102,6 +110,8 @@ def run():
     parser.add_argument('-port', type=int, default=5566, help='http binding port to stream flv(def. 5566)')
     parser.add_argument('-fps', type=int, default=10, help='fps calculation period (sec.) (def. 10)')
     parser.add_argument('-br', type=int, default=10, help='bitrate calculation period (sec.) (def. 10)')
+    parser.add_argument('-dump', type=bool, default=False, help='dump rtp stream (def. False)')
+    parser.add_argument('-position', type=int, default=0, help='ask position period(def. 0 - not ask)')
     parser.add_argument('-loglevel',
                         type=str,
                         default='info',
@@ -116,6 +126,6 @@ def run():
     }.get(args.loglevel, logging.NOTSET)()
     logging.getLogger().setLevel(level)
     try:
-        Service(rtsp_url=args.url, fps=args.fps, br=args.br).run(args.port)
+        Service(args).run(args.port)
     except BaseException as e:
         logging.critical(e)

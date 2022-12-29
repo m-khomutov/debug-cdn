@@ -8,7 +8,7 @@ from base64 import b64encode, b64decode
 from collections import namedtuple
 from enum import IntEnum
 from hashlib import md5
-from typing import Dict, Tuple, Union
+from typing import Dict, List, Tuple, Union
 from . import abs
 from . import calculator
 from . import sdp
@@ -40,11 +40,15 @@ class RtspException(BaseException):
 
 
 class Source:
-    def __init__(self, credentials: tuple, content: str, fps: Union[int, None]) -> None:
-        self.credentials = credentials
-        self.content: str = content
+    def __init__(self, **kwargs) -> None:
+        self.credentials = kwargs.get('credentials')
+        self.content: str = kwargs.get('content')
         self._content_base: str = ''
-        self._fps_calculator: Union[calculator.FpsCalculator, None] = calculator.FpsCalculator(fps) if fps else None
+        self._fps_calculator: Union[calculator.FpsCalculator, None] = None
+        if kwargs.get('fps'):
+            self._fps_calculator = calculator.FpsCalculator(kwargs.get('fps'))
+        self._dump_name: str = kwargs.get('dump')
+        self._ask_position: int = kwargs.get('pos_period')
         self.sink_table: Dict[Tuple[str, int], Connection] = {}
         self._sequence: int = 1
         self._buffer: bytearray = bytearray()
@@ -61,6 +65,7 @@ class Source:
         self.timestamp_delta: list = [0, 0]
         self._timeout: int = 0
         self._last_keepalive: int = 0
+        self._last_pos_request: int = time.time()
         self._keepalive: str = ''
         self._timing = time.time()
         self._credentials_not_accepted = 0
@@ -82,9 +87,7 @@ class Source:
     def on_stream(self, key: selectors.SelectorKey, data: bytes) -> None:
         if self._state == State.PLAYING:
             self._on_rtp_data(data)
-            if self._timeout and time.time() - self._last_keepalive > self._timeout - 3:
-                self._last_keepalive = time.time()
-                key.data.outb = self._keepalive.encode()
+            key.data.outb = self._on_additional_activity()
         else:
             try:
                 if self._session:
@@ -107,7 +110,7 @@ class Source:
         self._buffer.clear()
 
     def _on_rtsp_dialog(self, headers: list, remains: bytes) -> bytes:
-        logging.info('\n'.join(headers)+'\n')
+        logging.critical('\n'.join(headers)+'\n')
         self._set_status(headers[0])
         rc = b''
         if not (self._status == 200 or self._status == 401):
@@ -120,7 +123,8 @@ class Source:
                 'Content-Length': self._set_content,
                 'Session': self._set_session,
                 'Transport': self._set_transport,
-                'WWW-Authenticate': self._set_authentication
+                'WWW-Authenticate': self._set_authentication,
+                'Range': self._set_position
             }.get(hdr.split(':')[0], lambda **h: b'')(header=hdr, body=remains)
             if out_bytes:
                 rc = out_bytes
@@ -132,13 +136,9 @@ class Source:
 
     def _on_rtp_data(self, data: bytes):
         self._buffer += data
-        if self._buffer[0] != 0x24:
-            reply_end = self._buffer.find(b'\x0d\x0a\x0d\x0a')
-            if reply_end >= 0:
-                logging.debug(self._buffer[:reply_end+4].decode())
-                self._buffer = self._buffer[reply_end + 4:]
-            else:
-                return
+        self._verify_rtp_data()
+        if not self._buffer:
+            return
         while True:
             interleaved: RtpInterleaved = RtpInterleaved(chr(self._buffer[0]),
                                                          self._buffer[1],
@@ -178,6 +178,21 @@ class Source:
             else:
                 break
 
+    def _verify_rtp_data(self):
+        if self._buffer[0] != 0x24:
+            reply_end = self._buffer.find(b'\x0d\x0a\x0d\x0a')
+            if reply_end >= 0:
+                rtsp_reply_end: int = self._buffer.find(b'\x24', reply_end + 4)
+                if rtsp_reply_end > 0:
+                    self._on_rtsp_dialog(self._buffer[:reply_end].decode('utf-8').split('\r\n'),
+                                         self._buffer[reply_end + 4:rtsp_reply_end])
+                    self._buffer = self._buffer[rtsp_reply_end:]
+                else:
+                    self._on_rtsp_dialog(self._buffer[:reply_end].decode('utf-8').split('\r\n'))
+                    self._buffer = b''
+            else:
+                self._buffer = b''
+
     def _on_video_frame_ready(self, header: RtpHeader):
         if self._frame[0] & 0x1f == SequenceSetType.SPS:
             self.sps = self._frame
@@ -200,6 +215,18 @@ class Source:
         # TODO parse AU headers in 4 bytes
         for sink in self.sink_table.values():
             sink.on_audio(self._frame[4:], header.timestamp)
+
+    def _on_additional_activity(self) -> bytes:
+        rc: List[bytes] = []
+        if self._timeout and time.time() - self._last_keepalive > self._timeout - 3:
+            self._last_keepalive = time.time()
+            rc.append(self._keepalive.encode())
+            logging.critical(rc[-1].decode('utf-8'))
+        if self._ask_position and time.time() - self._last_pos_request > self._ask_position:
+            self._last_pos_request = time.time()
+            rc.append(self._get_parameter(parameter='position'))
+            logging.critical(rc[-1].decode('utf-8'))
+        return b''.join(rc)
 
     def _initialize_timestamp_set(self, header: RtpHeader):
         if not self.timestamp_delta[0]:
@@ -309,12 +336,27 @@ class Source:
             return control
         return self._content_base + control if self._content_base[-1] == '/' else self._content_base + '/' + control
 
+    def _set_position(self, **kwargs) -> bytes:
+        # clock: str = kwargs.get('header').split()[1].split('=')[1]
+        logging.critical(f'on position time: {time.time() - self._last_pos_request}')
+        return b''
+
     def _ask_describe(self, **kwargs) -> bytes:
         return f'DESCRIBE {self.url} RTSP/1.0\r\n' \
                f'Accept: application/sdp\r\n' \
                f'CSeq: {self._sequence}\r\n' \
                f'User-Agent: debug-cdn\r\n' \
                f'{self._get_authorization("DESCRIBE")}\r\n'.encode()
+
+    def _get_parameter(self, **kwargs) -> bytes:
+        return f'GET_PARAMETER {self.url} RTSP/1.0\r\n' \
+               f'Accept: application/sdp\r\n' \
+               f'CSeq: {self._sequence}\r\n' \
+               f'User-Agent: debug-cdn\r\n' \
+               f'Content-Type: text/parameters\r\n'\
+               f'Content-Length: {len(kwargs.get("parameter"))}\r\n' \
+               f'{self._get_authorization("GET_PARAMETER")}\r\n'\
+               f'{kwargs.get("parameter")}'.encode()
 
     def _ask_play(self) -> bytes:
         self._state = State.ASK_PLAYING
